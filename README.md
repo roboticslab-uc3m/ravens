@@ -1,3 +1,20 @@
+## Ravens - About this fork 
+This fork is intended to **train** and **test** transporter nets with our [SoftGym](https://github.com/roboticslab-uc3m/softgym) fork. Also copy this repo 
+in your [SoftAgent](https://github.com/Xingyu-Lin/softagent) main folder, so it looks like this:
+
+    ```
+    softagent
+    ├── ravens
+    ├── ...
+    ├── softgym
+    ```
+
+Dataset generation can be done using SoftGym fork above. Once a dataset is generated training can be done following default instructions. 
+
+TODO Publish test.py
+
+Below is original readme for reference.
+
 # Ravens - Transporter Networks
 
 Ravens is a collection of simulated tasks in PyBullet for learning vision-based robotic manipulation, with emphasis on pick and place.
