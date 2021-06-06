@@ -26,23 +26,26 @@ from ravens.tasks import cameras
 from ravens.utils import utils
 import tensorflow as tf
 
+from PIL import Image
+
 
 class TransporterAgent:
   """Agent that uses Transporter Networks."""
 
   def __init__(self, name, task, root_dir, n_rotations=36):
+    self.goal = True
     self.name = name
     self.task = task
     self.total_steps = 0
     self.crop_size = 64
     self.n_rotations = n_rotations
-    self.pix_size = 0.003125
-    self.in_shape = (320, 160, 6)
+    self.pix_size = 0.015625 # FleX cam#0.003125
+    self.in_shape = (128, 128, 6)#(320, 160, 6) # 
     self.cam_config = cameras.RealSenseD415.CONFIG
     self.models_dir = os.path.join(root_dir, 'checkpoints', self.name)
-    self.bounds = np.array([[0.25, 0.75], [-0.5, 0.5], [0, 0.28]])
+    self.bounds = np.array([[0.25, 0.75], [-0.5, 0.5], [0, 0.28]]) #TODO - bounds de softgym - ver utils get_height.
 
-  def get_image(self, obs):
+  def get_image(self, obs, sgym=True):
     """Stack color and height images image."""
 
     # if self.use_goal_image:
@@ -52,13 +55,18 @@ class TransporterAgent:
     #   assert input_image.shape[2] == 12, input_image.shape
 
     # Get color and height maps from RGB-D images.
-    cmap, hmap = utils.get_fused_heightmap(
-        obs, self.cam_config, self.bounds, self.pix_size)
+    # Obs from Softgym do not need fusing
+    if sgym:
+      cmap = obs['color']
+      hmap = obs['depth']
+    else:
+      cmap, hmap = utils.get_fused_heightmap(
+          obs, self.cam_config, self.bounds, self.pix_size)
     img = np.concatenate((cmap,
                           hmap[Ellipsis, None],
                           hmap[Ellipsis, None],
                           hmap[Ellipsis, None]), axis=2)
-    assert img.shape == self.in_shape, img.shape
+    #assert img.shape == self.in_shape, img.shape  # until we figure out what in_shape is
     return img
 
   def get_sample(self, dataset, augment=True):
@@ -77,15 +85,16 @@ class TransporterAgent:
       images is desired, it should be done outside this method.
     """
 
-    (obs, act, _, _), _ = dataset.sample()
+    (obs, act, _, _), (goal_obs, _, _, _) = dataset.sample()
     img = self.get_image(obs)
+    goal = self.get_image(goal_obs)
 
     # Get training labels from data sample.
     p0_xyz, p0_xyzw = act['pose0']
     p1_xyz, p1_xyzw = act['pose1']
-    p0 = utils.xyz_to_pix(p0_xyz, self.bounds, self.pix_size)
+    p0 = utils.xyz_to_pix_sg(p0_xyz, self.pix_size)
     p0_theta = -np.float32(utils.quatXYZW_to_eulerXYZ(p0_xyzw)[2])
-    p1 = utils.xyz_to_pix(p1_xyz, self.bounds, self.pix_size)
+    p1 = utils.xyz_to_pix_sg(p1_xyz, self.pix_size)
     p1_theta = -np.float32(utils.quatXYZW_to_eulerXYZ(p1_xyzw)[2])
     p1_theta = p1_theta - p0_theta
     p0_theta = 0
@@ -94,7 +103,7 @@ class TransporterAgent:
     if augment:
       img, _, (p0, p1), _ = utils.perturb(img, [p0, p1])
 
-    return img, p0, p0_theta, p1, p1_theta
+    return img, p0, p0_theta, p1, p1_theta, goal
 
   def train(self, dataset, writer=None):
     """Train on a dataset sample for 1 iteration.
@@ -104,13 +113,16 @@ class TransporterAgent:
       writer: a TF summary writer (for tensorboard).
     """
     tf.keras.backend.set_learning_phase(1)
-    img, p0, p0_theta, p1, p1_theta = self.get_sample(dataset)
+    # Goal is recovered as img
+    img, p0, p0_theta, p1, p1_theta, goal = self.get_sample(dataset)
 
     # Get training losses.
     step = self.total_steps + 1
     loss0 = self.attention.train(img, p0, p0_theta)
     if isinstance(self.transport, Attention):
       loss1 = self.transport.train(img, p1, p1_theta)
+    elif isinstance(self.transport, TransportGoal):
+      loss1 = self.transport.train(img, goal, p0, p1, p1_theta)
     else:
       loss1 = self.transport.train(img, p0, p1, p1_theta)
     with writer.as_default():
@@ -168,6 +180,12 @@ class TransporterAgent:
 
     # Get heightmap from RGB-D images.
     img = self.get_image(obs)
+    # Get goal image, assume we recevive whole episode (obs, act, rw, info)
+    (goal_obs, _, _, _) = goal
+    goal_img = self.get_image(goal_obs)
+    # Visualize goal image - debug
+    #g_img_dbug = Image.fromarray(goal_obs['color'], 'RGB') # debug
+    #g_img_dbug.show()
 
     # Attention model forward pass.
     pick_conf = self.attention.forward(img)
@@ -177,7 +195,10 @@ class TransporterAgent:
     p0_theta = argmax[2] * (2 * np.pi / pick_conf.shape[2])
 
     # Transport model forward pass.
-    place_conf = self.transport.forward(img, p0_pix)
+    if isinstance(self.transport, TransportGoal):
+      place_conf = self.transport.forward(img, goal_img, p0_pix)
+    else:
+      place_conf = self.transport.forward(img,p0_pix)
     argmax = np.argmax(place_conf)
     argmax = np.unravel_index(argmax, shape=place_conf.shape)
     p1_pix = argmax[:2]
@@ -185,8 +206,8 @@ class TransporterAgent:
 
     # Pixels to end effector poses.
     hmap = img[:, :, 3]
-    p0_xyz = utils.pix_to_xyz(p0_pix, hmap, self.bounds, self.pix_size)
-    p1_xyz = utils.pix_to_xyz(p1_pix, hmap, self.bounds, self.pix_size)
+    p0_xyz = utils.pix_to_xyz_sg(p0_pix, hmap, self.pix_size)
+    p1_xyz = utils.pix_to_xyz_sg(p1_pix, hmap, self.pix_size)
     p0_xyzw = utils.eulerXYZ_to_quatXYZW((0, 0, -p0_theta))
     p1_xyzw = utils.eulerXYZ_to_quatXYZW((0, 0, -p1_theta))
 
@@ -300,8 +321,8 @@ class GoalTransporterAgent(TransporterAgent):
         n_rotations=1,
         preprocess=utils.preprocess)
     self.transport = TransportGoal(
-        in_shape=self.in_shape,
-        n_rotations=self.n_rotations,
+        input_shape=self.in_shape,
+        num_rotations=self.n_rotations,
         crop_size=self.crop_size,
         preprocess=utils.preprocess)
 
@@ -309,7 +330,7 @@ class GoalTransporterAgent(TransporterAgent):
 class GoalNaiveTransporterAgent(TransporterAgent):
   """Naive version which stacks current and goal images through normal Transport."""
 
-  def __init__(self, name, task, n_rotations=36):
+  """def __init__(self, name, task, n_rotations=36):
     super().__init__(name, task, n_rotations)
 
     # Stack the goal image for the vanilla Transport module.
@@ -327,3 +348,16 @@ class GoalNaiveTransporterAgent(TransporterAgent):
         preprocess=utils.preprocess,
         per_pixel_loss=False,
         use_goal_image=True)
+    """
+  def __init__(self, name, task, n_rotations=36):
+    super().__init__(name, task, n_rotations)
+
+    self.attention = Attention(
+        in_shape=self.in_shape,
+        n_rotations=1,
+        preprocess=utils.preprocess)
+    self.transport = TransportGoal(
+        input_shape=self.in_shape,
+        num_rotations=self.n_rotations,
+        crop_size=self.crop_size,
+        preprocess=utils.preprocess)
