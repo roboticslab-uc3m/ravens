@@ -25,7 +25,7 @@ import meshcat.transformations as mtf
 import numpy as np
 from transforms3d import euler
 
-import pybullet as p
+#import pybullet as p
 
 #-----------------------------------------------------------------------------
 # HEIGHTMAP UTILS
@@ -140,12 +140,33 @@ def pix_to_xyz(pixel, height, bounds, pixel_size, skip_height=False):
     z = 0.0
   return (x, y, z)
 
+def pix_to_xyz_sg(pixel, height, pixel_size, skip_height=False):
+  """Convert from pixel location on heightmap to 3D position."""
+  u, v = pixel
+  x = 0.5 + ((u - 64) * pixel_size)
+  y = 0.5 + ((v - 64) * pixel_size)
+  if not skip_height:
+    z = height[u, v]
+  else:
+    z = 0.0
+  return (x, y, z)
+
 
 def xyz_to_pix(position, bounds, pixel_size):
   """Convert from 3D position to pixel location on heightmap."""
   u = int(np.round((position[1] - bounds[1, 0]) / pixel_size))
   v = int(np.round((position[0] - bounds[0, 0]) / pixel_size))
   return (u, v)
+
+def xyz_to_pix_sg(position, pixel_size):
+  """Convert from 3D position to pixel location on heightmap.
+     Hardcoded to work with softgym 128,128 pix orthographic image"""
+  u = (position[1] - 0.5) / pixel_size
+  v = (position[0] - 0.5) / pixel_size
+  u = int(np.round(64 + u))
+  v = int(np.round(64 + v))
+  return (u, v)
+
 
 
 def unproject_vectorized(uv_coordinates, depth_values,
